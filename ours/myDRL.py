@@ -8,11 +8,19 @@ import json,ast
 import tensorflow as tf
 import setting
 import copy
+import os
 
 SIZE = 24
 
+def seed_tensorflow(seed):
+    #random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
 def DRL_thread():
     print("enter thread")
+    seed_tensorflow(1222)
     column, row = SIZE,SIZE
     brain = [[0]*row for _ in range(column)]
     for i in range(1,SIZE):
@@ -29,23 +37,52 @@ def DRL_thread():
     action_memory = np.zeros((24,24))
     state_memory = np.zeros((24,24))
     reward_list = []
+    reward_list_bwd = []
+    reward_list_delay = []
+    reward_list_loss = []
+    loss_value_list = []
+    delay_value_list = []
+    change_path_list = []
     print("Start learning")
     while True:
         time_in = time.time()
         step += 1
         state = get_state()  # get new state
-        all_reward = path_metrics_to_reward()
+        #all_reward = path_metrics_to_reward()
+        all_reward,all_reward_indicator,loss_value_path,delay_value_path = path_metrics_to_reward()
         drl_paths = {}
         reward_all = 0
+        reward_all_bwd = 0
+        reward_all_delay = 0
+        reward_all_loss = 0
+        loss_value_all = 0
+        delay_value_all = 0
+        change_path_counter = 0
         for i in range(1,SIZE):
             drl_paths.setdefault(str(i), {})
             for j in range(1,SIZE):
                 if i != j:
                     reward = all_reward[str(i)][str(j)][int(action_memory[i][j])]
                     reward_all += reward
+                    reward_bwd = all_reward_indicator[str(i)][str(j)][int(action_memory[i][j])][0]
+                    reward_all_bwd += reward_bwd
+                    reward_delay = all_reward_indicator[str(i)][str(j)][int(action_memory[i][j])][1]
+                    reward_all_delay += reward_delay
+                    reward_loss = all_reward_indicator[str(i)][str(j)][int(action_memory[i][j])][2]
+                    reward_all_loss += reward_loss
+                    loss_value = loss_value_path[str(i)][str(j)][int(action_memory[i][j])]
+                    #print(loss_value_path[str(i)][str(j)][int(action_memory[i][j])])
+                    loss_value_all += loss_value
+                    delay_value = delay_value_path[str(i)][str(j)][int(action_memory[i][j])]
+                    #print(loss_value_path[str(i)][str(j)][int(action_memory[i][j])])
+                    delay_value_all += delay_value
                     if step != 1:
                         brain[i][j].append_sample(state_memory,tf.convert_to_tensor(action_memory[i][j], dtype=tf.int32),state,reward)
                     action,q_value = brain[i][j].get_action([state],epsilon)
+                    if action!=action_memory[i][j]:
+                        change_path_counter = change_path_counter + 1
+                        print(i,j)
+                    #print([state])
                     action_memory[i][j] = action
                     drl_paths[str(i)][str(j)] = [all_path_list[i][j][action]]
                     if len(brain[i][j].memory) > brain[i][j].batch_size:
@@ -68,12 +105,45 @@ def DRL_thread():
         f = open(path, 'w')
         f.writelines(str(reward_list))
         f.close()
+        reward_list_bwd.append(int(reward_all_bwd))
+        path = 'output_bwd.txt'
+        f = open(path, 'w')
+        f.writelines(str(reward_list_bwd))
+        f.close()
+        reward_list_delay.append(int(reward_all_delay))
+        path = 'output_delay.txt'
+        f = open(path, 'w')
+        f.writelines(str(reward_list_delay))
+        f.close()
+        reward_list_loss.append(int(reward_all_loss))
+        path = 'output_loss.txt'
+        f = open(path, 'w')
+        f.writelines(str(reward_list_loss))
+        f.close()
+        loss_value_list.append(float(loss_value_all))
+        path = 'output_loss_value.txt'
+        f = open(path, 'w')
+        f.writelines(str(loss_value_list))
+        f.close()
+        delay_value_list.append(float(delay_value_all))
+        path = 'delay_value.txt'
+        f = open(path, 'w')
+        f.writelines(str(delay_value_list))
+        f.close()
+        change_path_list.append(int(change_path_counter))
+        path = 'changepath.txt'
+        f = open(path, 'w')
+        f.writelines(str(change_path_list))
+        f.close()
         print("------------------------------------------ step %d ------------------------------------------" % step)
         print("------------------------------------------  epsilon  %f ------------------------------------------   " % epsilon)
         if time_end - time_in < 10 :
             time.sleep(10 - (time_end - time_in)) # wait for monitor period
         if epsilon > epsilon_final:
             epsilon = epsilon*0.99
+            #epsilon = epsilon - 1/2500
+        """if epsilon > epsilon_final:
+            epsilon -= (epsilon_ini - epsilon_final)/2000"""
 
 
 def DRL_thread_rank():
@@ -177,6 +247,7 @@ def DRL_eval():
         # write route path
         with open('./drl_paths.json','w') as json_file:
             json.dump(drl_paths, json_file, indent=2)
+        print("dump")
         time_end = time.time()
         if time_end - time_in < setting.MONITOR_PERIOD :
             time.sleep(setting.MONITOR_PERIOD - (time_end - time_in)) # wait for monitor period
@@ -188,6 +259,9 @@ def path_metrics_to_reward():
     # read path metrices file
     file = './paths_metrics.json'
     rewards_dic = {}
+    rewards_indicator = {}
+    loss_value = {}
+    delay_value = {}
     metrics = ['bwd_paths','delay_paths','loss_paths']
     try:
         with open(file,'r') as json_file:
@@ -202,8 +276,16 @@ def path_metrics_to_reward():
 
     for i in paths_metrics_dict:
         rewards_dic.setdefault(i,{})
+        rewards_indicator.setdefault(i,{})
+        loss_value.setdefault(i,{})
+        delay_value.setdefault(i,{})
         for j in paths_metrics_dict[i]:
             rewards_dic.setdefault(j,{})
+            rewards_indicator.setdefault(j,{})
+            loss_value.setdefault(j,{})
+            delay_value.setdefault(i,{})
+            loss_value[i][j] = paths_metrics_dict[str(i)][str(j)]['loss_paths'][0]
+            delay_value[i][j] = paths_metrics_dict[str(i)][str(j)]['delay_paths'][0]
             for m in metrics:
                 if m == metrics[0]:
                     bwd_cost = []
@@ -217,11 +299,15 @@ def path_metrics_to_reward():
     
     for i in paths_metrics_dict:
         for j in paths_metrics_dict[i]:
-            rewards_actions = []              
+            rewards_actions = []   
+            rewards_actions_indicator = []           
             for act in range(20):
                 rewards_actions.append(reward(i,j,paths_metrics_dict,act,metrics))
+                rewards_actions_indicator.append(rewards_indicator_fun(i,j,paths_metrics_dict,act,metrics))
                 rewards_dic[i][j] = rewards_actions
-    return rewards_dic
+                rewards_indicator[i][j] = rewards_actions_indicator
+    return rewards_dic,rewards_indicator,loss_value,delay_value
+
 
 
 def path_metrics_to_reward_rank():
@@ -345,6 +431,18 @@ def reward(src, dst, paths_metrics_dict, act, metrics):
     beta3=1
     reward = beta1*paths_metrics_dict[str(src)][str(dst)][metrics[0]][1][act] + beta2*paths_metrics_dict[str(src)][str(dst)][metrics[1]][1][act] + beta3*paths_metrics_dict[str(src)][str(dst)][metrics[2]][1][act]
     return round(reward,15)
+
+def rewards_indicator_fun(src, dst, paths_metrics_dict, act, metrics):
+    '''
+    paths_metrics_dict ={src:{dst:{metric1:[[orig value list],[normalized value list]]},metric2...}}
+    '''
+    beta1=1
+    beta2=1
+    beta3=1
+    reward = beta1*paths_metrics_dict[str(src)][str(dst)][metrics[0]][1][act] + beta2*paths_metrics_dict[str(src)][str(dst)][metrics[1]][1][act] + beta3*paths_metrics_dict[str(src)][str(dst)][metrics[2]][1][act]
+    #return (round(paths_metrics_dict[str(src)][str(dst)][metrics[0]][1][act] ,15),round(paths_metrics_dict[str(src)][str(dst)][metrics[1]][1][act] ,15),round(paths_metrics_dict[str(src)][str(dst)][metrics[2]][1][act] ,15))
+    return (paths_metrics_dict[str(src)][str(dst)][metrics[0]][1][act],paths_metrics_dict[str(src)][str(dst)][metrics[1]][1][act],paths_metrics_dict[str(src)][str(dst)][metrics[2]][1][act])
+
 
 def state_to_action(): # 20 paths according src,dst
     file = './Routing/k_paths.json'
